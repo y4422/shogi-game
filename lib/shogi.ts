@@ -182,6 +182,32 @@ export function inCheck(pos: Position): boolean {
   return isAttacked(pos.board, findKing(pos.board, pos.turn), (1 - pos.turn) as Player);
 }
 
+// 各マスへの利き数(自駒のマスへの利き=守りも含む)。戻り値は [先手の利き, 後手の利き]
+export function attackCounts(board: Int8Array): [Uint8Array, Uint8Array] {
+  const res: [Uint8Array, Uint8Array] = [new Uint8Array(81), new Uint8Array(81)];
+  for (let from = 0; from < 81; from++) {
+    const p = board[from];
+    if (!p) continue;
+    const o = (p >> 4) as Player;
+    const t = p & 15;
+    const r = (from / 9) | 0, c = from % 9;
+    for (const [dr, dc] of STEPS[o][t]) {
+      const rr = r + dr, cc = c + dc;
+      if (rr < 0 || rr > 8 || cc < 0 || cc > 8) continue;
+      res[o][rr * 9 + cc]++;
+    }
+    for (const [dr, dc] of SLIDES[o][t]) {
+      let rr = r + dr, cc = c + dc;
+      while (rr >= 0 && rr < 9 && cc >= 0 && cc < 9) {
+        res[o][rr * 9 + cc]++;
+        if (board[rr * 9 + cc]) break;
+        rr += dr; cc += dc;
+      }
+    }
+  }
+  return res;
+}
+
 const inZone = (o: Player, r: number) => (o === 0 ? r <= 2 : r >= 6);
 
 function pushBoardMove(moves: Move[], turn: Player, t: number, from: number, to: number) {

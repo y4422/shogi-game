@@ -6,7 +6,7 @@ import {
   FU, KY, KE, GI, KI, KA, HI, OU, TO, NY, NK, NG, UM, RY,
   PROMOTE,
   typeOf, ownerOf, initialPosition, clonePosition,
-  makeMove, legalMoves, inCheck, moveToKifu, sameMove,
+  makeMove, legalMoves, inCheck, moveToKifu, sameMove, attackCounts,
   PIECE_KANJI, KIFU_KANJI, squareName,
 } from "@/lib/shogi";
 import { searchBestMove, SearchResult, SearchOptions } from "@/lib/ai";
@@ -94,6 +94,7 @@ interface PendingJudge {
   playedNotation: string;
   baseSnap: GameSnap; // プレイヤーが指す直前の局面
   prevTo: number; // 「同」表記用
+  ply: number; // この手が何手目か
 }
 
 interface PvPreview {
@@ -330,23 +331,42 @@ export default function ShogiGame() {
   const [hintBusy, setHintBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [coachOn, setCoachOn] = useState(true);
+  const [showEffects, setShowEffects] = useState(false);
   const [advice, setAdvice] = useState<CoachAdvice | null>(null);
   const [preview, setPreview] = useState<PvPreview | null>(null);
+  const [replayPly, setReplayPly] = useState<number | null>(null); // 棋譜のこの手数を盤に表示中
+  const [hoverPly, setHoverPly] = useState<number | null>(null); // グラフのホバー位置
   const [gradeCounts, setGradeCounts] = useState<Record<Grade, number>>(initialGradeCounts);
+  const [evalByPly, setEvalByPly] = useState<Record<number, number>>({}); // 先手視点cp
+  const [gradeByPly, setGradeByPly] = useState<Record<number, Grade>>({});
   const workerRef = useRef<Worker | null>(null);
   const kifuRef = useRef<HTMLDivElement>(null);
   const lastInfoAt = useRef(0);
   const gameRef = useRef(game);
   gameRef.current = game;
+  const historyRef = useRef(history);
+  historyRef.current = history;
   const preSearchRef = useRef<CoachSearch | null>(null);
   const coachSessionRef = useRef(0); // 待った/再対局で古い判定を無効化する世代カウンタ
   const coachWorkerRef = useRef<Worker | null>(null);
   const coachChainRef = useRef<Promise<unknown>>(Promise.resolve());
 
-  // コーチ設定を保存・復元
+  // コーチ・利き表示の設定を保存・復元
   useEffect(() => {
     const saved = localStorage.getItem("shogi-coach");
     if (saved !== null) setCoachOn(saved !== "0");
+    setShowEffects(localStorage.getItem("shogi-effects") === "1");
+  }, []);
+  const toggleEffects = () => {
+    setShowEffects(v => {
+      localStorage.setItem("shogi-effects", v ? "0" : "1");
+      return !v;
+    });
+  };
+
+  // 形勢の記録(グラフ用、先手視点)
+  const recordEval = useCallback((ply: number, senteCp: number) => {
+    setEvalByPly(m => ({ ...m, [ply]: clampScore(senteCp) }));
   }, []);
   const toggleCoach = () => {
     setCoachOn(v => {
@@ -438,7 +458,7 @@ export default function ShogiGame() {
       const post = await coachEvaluate(next, 400);
       if (!post || coachSessionRef.current !== sess) return;
       const playedScore = -post.score; // 手番(相手)視点 → プレイヤー視点
-      const { pre, playedMove, playedNotation, baseSnap, prevTo } = pj;
+      const { pre, playedMove, playedNotation, baseSnap, prevTo, ply } = pj;
       const basePos = toPos(baseSnap);
       const isBest = pre.move !== null && sameMove(pre.move, playedMove);
       const loss = Math.max(0, pre.score - playedScore);
@@ -448,6 +468,9 @@ export default function ShogiGame() {
             : loss <= 250 ? "ok"
               : loss <= 600 ? "dubious"
                 : loss <= 1200 ? "bad" : "blunder";
+      // 指した手番(=プレイヤー)視点 → 先手視点にしてグラフへ記録
+      recordEval(ply, baseSnap.turn === 0 ? playedScore : -playedScore);
+      setGradeByPly(m => ({ ...m, [ply]: grade }));
       setGradeCounts(c => ({ ...c, [grade]: c[grade] + 1 }));
       if (grade === "ok") return;
 
@@ -482,7 +505,7 @@ export default function ShogiGame() {
         baseSnap,
       });
     })();
-  }, [coachEvaluate]);
+  }, [coachEvaluate, recordEval]);
 
   const aiColor = (1 - playerColor) as Player;
   const flip = playerColor === 1;
@@ -508,6 +531,7 @@ export default function ShogiGame() {
           playedNotation: notation,
           baseSnap: game,
           prevTo: lastMove?.to ?? -1,
+          ply: history.length + 1,
         };
       }
     }
@@ -580,7 +604,9 @@ export default function ShogiGame() {
       const opts = diff.js;
       const handleJsResult = (r: SearchResult) => {
         const sign = aiColor === 0 ? 1 : -1;
-        setEvalState({ senteCp: r.score * sign, mate: null, pvText: "" });
+        const senteCp = clampScore(r.score) * sign;
+        setEvalState({ senteCp, mate: null, pvText: "" });
+        if (r.move) recordEval(historyRef.current.length + 1, senteCp);
         finish(r.move, { name: "内蔵JS探索", depth: r.depth, nodes: r.nodes, timeMs: r.timeMs });
       };
       const fallbackSync = () => {
@@ -649,6 +675,14 @@ export default function ShogiGame() {
         }
         lastInfoAt.current = 0;
         updateEval(res, aiColor, base);
+        {
+          // グラフ用に先手視点で記録(詰みは±上限に丸める)
+          const sign = aiColor === 0 ? 1 : -1;
+          const senteCp = res.scoreMate !== null
+            ? (res.scoreMate > 0 ? 1 : -1) * sign * 30000
+            : (res.scoreCp ?? 0) * sign;
+          recordEval(historyRef.current.length + 1, senteCp);
+        }
         finish(m, {
           name: eng.displayName,
           depth: res.depth,
@@ -716,6 +750,7 @@ export default function ShogiGame() {
       setPending(null);
       setSelected(null);
       setPreview(null);
+      setReplayPly(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -743,6 +778,7 @@ export default function ShogiGame() {
   const openPreview = () => {
     if (!advice?.preview) return;
     setSelected(null);
+    setReplayPly(null);
     setPreview({ ...advice.preview, idx: 1 });
   };
   const closePreview = () => setPreview(null);
@@ -754,6 +790,20 @@ export default function ShogiGame() {
     });
   };
 
+  // 感想戦: 棋譜の任意の手を盤に表示
+  const openReplay = (ply: number) => {
+    if (history.length === 0) return;
+    setPreview(null);
+    setSelected(null);
+    setReplayPly(Math.max(0, Math.min(history.length, ply)));
+  };
+  const stepReplay = (d: number) => {
+    setReplayPly(p =>
+      p === null ? p : Math.max(0, Math.min(history.length, p + d))
+    );
+  };
+  const closeReplay = () => setReplayPly(null);
+
   // 「試してみる」= 待ったで戻り、おすすめ手をハイライト
   const tryBest = () => {
     if (!advice || thinking) return;
@@ -762,8 +812,10 @@ export default function ShogiGame() {
     setHintMove(best);
   };
 
+  const boardLocked = preview !== null || replayPly !== null;
+
   const onCellClick = (idx: number) => {
-    if (preview) return;
+    if (boardLocked) return;
     if (!playerTurn || pending) return;
     const options = dests.get(idx);
     if (options && options.length > 0) {
@@ -780,7 +832,7 @@ export default function ShogiGame() {
   };
 
   const onHandClick = (owner: Player, piece: number) => {
-    if (preview) return;
+    if (boardLocked) return;
     if (!playerTurn || pending || owner !== playerColor) return;
     if (game.hands[playerColor][piece] <= 0) return;
     setSelected(prev =>
@@ -809,7 +861,11 @@ export default function ShogiGame() {
     setThinking(false);
     setAdvice(null);
     setPreview(null);
+    setReplayPly(null);
+    setHoverPly(null);
     setGradeCounts(initialGradeCounts());
+    setEvalByPly({});
+    setGradeByPly({});
     preSearchRef.current = null;
     coachSessionRef.current++;
   };
@@ -833,7 +889,14 @@ export default function ShogiGame() {
     setHintMove(null);
     setAdvice(null);
     setPreview(null);
+    setReplayPly(null);
+    setHoverPly(null);
     coachSessionRef.current++;
+    // 巻き戻した先より後の記録は破棄
+    const keep = (rec: Record<number, number> | Record<number, Grade>) =>
+      Object.fromEntries(Object.entries(rec).filter(([k]) => Number(k) <= h.length));
+    setEvalByPly(m => keep(m) as Record<number, number>);
+    setGradeByPly(m => keep(m) as Record<number, Grade>);
     setLastMove(h.length > 0 ? h[h.length - 1].move : null);
   };
 
@@ -938,14 +1001,66 @@ export default function ShogiGame() {
     );
   };
 
-  // プレビュー中は読み筋の局面を表示する
-  const view = preview ? preview.snaps[preview.idx] : game;
-  const previewMove = preview && preview.idx > 0 ? preview.moves[preview.idx - 1] : null;
+  // プレビュー/感想戦中はその局面を表示する
+  const replaySnap = replayPly === null
+    ? null
+    : replayPly >= history.length ? game : history[replayPly].before;
+  const view = preview ? preview.snaps[preview.idx] : replaySnap ?? game;
+  const overrideMove = preview
+    ? (preview.idx > 0 ? preview.moves[preview.idx - 1] : null)
+    : replayPly !== null
+      ? (replayPly > 0 ? history[replayPly - 1].move : null)
+      : null;
+
+  // 利き表示: 表示中の盤面に対する両者の利き数
+  const effectCounts = useMemo(
+    () => (showEffects ? attackCounts(Int8Array.from(view.board)) : null),
+    [showEffects, view]
+  );
+
+  // 形勢グラフ用の点列(先手視点 → プレイヤー視点に変換して描画)
+  const evalPoints = useMemo(() => {
+    const pts: { ply: number; cp: number }[] = [];
+    for (let i = 1; i <= history.length; i++) {
+      const v = evalByPly[i];
+      if (v !== undefined) pts.push({ ply: i, cp: v });
+    }
+    return pts;
+  }, [evalByPly, history.length]);
+
+  const GW = 280, GH = 76, GPX = 6, GPY = 8;
+  const graphX = (ply: number) =>
+    GPX + (history.length <= 1 ? 0 : ((ply - 1) / (history.length - 1)) * (GW - GPX * 2));
+  const graphY = (senteCp: number) => {
+    const pcp = playerColor === 0 ? senteCp : -senteCp;
+    const wr = 1 / (1 + Math.exp(-pcp / 600));
+    return GPY + (1 - wr) * (GH - GPY * 2);
+  };
+  const plyFromPointer = (e: React.PointerEvent<SVGSVGElement> | React.MouseEvent<SVGSVGElement>) => {
+    if (evalPoints.length === 0) return null;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const fx = ((e.clientX - rect.left) / rect.width) * GW;
+    let best: number | null = null;
+    let bestD = Infinity;
+    for (const p of evalPoints) {
+      const d = Math.abs(graphX(p.ply) - fx);
+      if (d < bestD) { bestD = d; best = p.ply; }
+    }
+    return best;
+  };
+  const readoutPly = hoverPly ?? replayPly;
+  const readoutText = readoutPly !== null && readoutPly > 0 && history[readoutPly - 1]
+    ? `${readoutPly}手目 ${history[readoutPly - 1].notation}${
+        evalByPly[readoutPly] !== undefined
+          ? ` (${(playerColor === 0 ? evalByPly[readoutPly] : -evalByPly[readoutPly]) > 0 ? "+" : ""}${playerColor === 0 ? evalByPly[readoutPly] : -evalByPly[readoutPly]})`
+          : ""
+      }`
+    : "";
 
   const renderHand = (owner: Player) => {
     const hand = view.hands[owner];
     const isPlayer = owner === playerColor;
-    const active = !preview && !gameOver && game.turn === owner;
+    const active = !boardLocked && !gameOver && game.turn === owner;
     return (
       <div
         className={`${styles.hand} ${isPlayer ? styles.handMine : styles.handOpp} ${active ? styles.handActive : ""}`}
@@ -1042,6 +1157,38 @@ export default function ShogiGame() {
 
         {renderHand(aiColor)}
 
+        {replayPly !== null && !preview && (
+          <div className={`${styles.previewBar} ${styles.replayBar}`}>
+            <span className={styles.replayTitle}>感想戦</span>
+            <span className={styles.previewStep}>
+              {replayPly === 0
+                ? "開始局面"
+                : `${replayPly}/${history.length}手 ${history[replayPly - 1]?.notation ?? ""}`}
+            </span>
+            <span className={styles.previewButtons}>
+              <button
+                className={styles.previewBtn}
+                onClick={() => stepReplay(-1)}
+                disabled={replayPly === 0}
+                aria-label="1手戻る"
+              >
+                ◀
+              </button>
+              <button
+                className={styles.previewBtn}
+                onClick={() => stepReplay(1)}
+                disabled={replayPly >= history.length}
+                aria-label="1手進む"
+              >
+                ▶
+              </button>
+              <button className={`${styles.previewClose} ${styles.replayClose}`} onClick={closeReplay}>
+                対局に戻る
+              </button>
+            </span>
+          </div>
+        )}
+
         {preview && (
           <div className={styles.previewBar}>
             <span className={styles.previewTitle}>
@@ -1087,12 +1234,14 @@ export default function ShogiGame() {
                   const vr = (vi / 9) | 0, vc = vi % 9;
                   const idx = flip ? (8 - vr) * 9 + (8 - vc) : vr * 9 + vc;
                   const p = view.board[idx];
-                  const isDest = !preview && dests.has(idx);
-                  const isSel = !preview && selected?.kind === "board" && selected.sq === idx;
-                  const isLast = preview
-                    ? previewMove !== null && (previewMove.to === idx || previewMove.from === idx)
+                  const isDest = !boardLocked && dests.has(idx);
+                  const isSel = !boardLocked && selected?.kind === "board" && selected.sq === idx;
+                  const isLast = boardLocked
+                    ? overrideMove !== null && (overrideMove.to === idx || overrideMove.from === idx)
                     : lastMove?.to === idx || (lastMove?.from ?? -2) === idx;
-                  const isHint = !preview && hintMove !== null && (hintMove.to === idx || hintMove.from === idx);
+                  const isHint = !boardLocked && hintMove !== null && (hintMove.to === idx || hintMove.from === idx);
+                  const mineEff = effectCounts ? effectCounts[playerColor][idx] : 0;
+                  const oppEff = effectCounts ? effectCounts[aiColor][idx] : 0;
                   const cellLabel =
                     squareName(idx) +
                     (p
@@ -1121,6 +1270,16 @@ export default function ShogiGame() {
                         </span>
                       )}
                       {isDest && p === 0 && <span className={styles.dot} />}
+                      {mineEff > 0 && (
+                        <span className={`${styles.effBadge} ${styles.effMine}`} aria-hidden>
+                          {mineEff}
+                        </span>
+                      )}
+                      {oppEff > 0 && (
+                        <span className={`${styles.effBadge} ${styles.effOpp}`} aria-hidden>
+                          {oppEff}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -1213,15 +1372,27 @@ export default function ShogiGame() {
           <button className={styles.btn} onClick={hint} disabled={!playerTurn || hintBusy}>
             {hintBusy ? "考え中…" : "ヒント"}
           </button>
-          <button className={`${styles.btn} ${styles.btnDanger}`} onClick={requestResign} disabled={!!gameOver}>
-            投了
-          </button>
           <button
             className={`${styles.btn} ${coachOn ? styles.btnToggleOn : ""}`}
             onClick={toggleCoach}
             aria-pressed={coachOn}
           >
             コーチ {coachOn ? "ON" : "OFF"}
+          </button>
+          <button
+            className={`${styles.btn} ${showEffects ? styles.btnToggleOn : ""}`}
+            onClick={toggleEffects}
+            aria-pressed={showEffects}
+            title="駒の利きを盤上に表示"
+          >
+            利き {showEffects ? "ON" : "OFF"}
+          </button>
+          <button
+            className={`${styles.btn} ${styles.btnDanger} ${styles.btnWide}`}
+            onClick={requestResign}
+            disabled={!!gameOver}
+          >
+            投了
           </button>
           <label className={styles.diffLabel}>
             <span>強さ</span>
@@ -1265,17 +1436,90 @@ export default function ShogiGame() {
               )}
             </button>
           </div>
+          {evalPoints.length >= 2 && (
+            <div className={styles.graphBox}>
+              <div className={styles.graphHead}>
+                <h3>形勢の推移</h3>
+                <span className={styles.graphReadout}>{readoutText || "タップで局面を再生"}</span>
+              </div>
+              <svg
+                className={styles.graph}
+                viewBox={`0 0 ${GW} ${GH}`}
+                role="img"
+                aria-label="形勢の推移グラフ。タップするとその局面を盤に表示します"
+                onPointerMove={e => setHoverPly(plyFromPointer(e))}
+                onPointerLeave={() => setHoverPly(null)}
+                onClick={e => {
+                  const p = plyFromPointer(e);
+                  if (p !== null) openReplay(p);
+                }}
+              >
+                <rect x="0" y="0" width={GW} height={GH / 2} className={styles.graphZoneYou} />
+                <rect x="0" y={GH / 2} width={GW} height={GH / 2} className={styles.graphZoneAi} />
+                <line x1="0" y1={GH / 2} x2={GW} y2={GH / 2} className={styles.graphMid} />
+                <text x="4" y="13" className={styles.graphZoneLabel}>あなた優勢</text>
+                <text x="4" y={GH - 5} className={styles.graphZoneLabel}>AI優勢</text>
+                {hoverPly !== null && (
+                  <line
+                    x1={graphX(hoverPly)} y1="2" x2={graphX(hoverPly)} y2={GH - 2}
+                    className={styles.graphHover}
+                  />
+                )}
+                {replayPly !== null && replayPly > 0 && (
+                  <line
+                    x1={graphX(replayPly)} y1="2" x2={graphX(replayPly)} y2={GH - 2}
+                    className={styles.graphCurrent}
+                  />
+                )}
+                <polyline
+                  points={evalPoints.map(p => `${graphX(p.ply)},${graphY(p.cp)}`).join(" ")}
+                  className={styles.graphLine}
+                />
+                {evalPoints
+                  .filter(p => {
+                    const g = gradeByPly[p.ply];
+                    return g === "dubious" || g === "bad" || g === "blunder";
+                  })
+                  .map(p => (
+                    <circle
+                      key={p.ply}
+                      cx={graphX(p.ply)} cy={graphY(p.cp)} r="3.5"
+                      className={styles.graphBadDot}
+                    />
+                  ))}
+              </svg>
+            </div>
+          )}
           <div className={styles.kifu} ref={kifuRef}>
             {history.length === 0 && <div className={styles.kifuEmpty}>まだ指し手はありません</div>}
             {history.map((e, i) => (
-              <div
+              <button
                 key={i}
-                className={`${styles.kifuLine} ${i === history.length - 1 ? styles.kifuLatest : ""}`}
+                type="button"
+                className={`${styles.kifuLine} ${
+                  replayPly === i + 1
+                    ? styles.kifuSelected
+                    : replayPly === null && i === history.length - 1
+                      ? styles.kifuLatest
+                      : ""
+                }`}
+                onClick={() => (replayPly === i + 1 ? closeReplay() : openReplay(i + 1))}
+                aria-label={`${i + 1}手目 ${e.notation} を盤に表示`}
               >
                 <span className={styles.kifuNum}>{i + 1}</span>
                 <span className={styles.kifuMark}>{e.before.turn === 0 ? "☗" : "☖"}</span>
                 {e.notation}
-              </div>
+                {(gradeByPly[i + 1] === "dubious" || gradeByPly[i + 1] === "bad" || gradeByPly[i + 1] === "blunder") && (
+                  <span className={styles.kifuBadMark} title={GRADE_INFO[gradeByPly[i + 1]].label}>
+                    {gradeByPly[i + 1] === "dubious" ? "?!" : gradeByPly[i + 1] === "bad" ? "?" : "??"}
+                  </span>
+                )}
+                {(gradeByPly[i + 1] === "best" || gradeByPly[i + 1] === "good") && (
+                  <span className={styles.kifuGoodMark} title={GRADE_INFO[gradeByPly[i + 1]].label}>
+                    {gradeByPly[i + 1] === "best" ? "!" : "○"}
+                  </span>
+                )}
+              </button>
             ))}
           </div>
           {evalState?.pvText && (

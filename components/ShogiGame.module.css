@@ -340,6 +340,35 @@
   z-index: 1;
 }
 
+/* ==== 利き表示 ==== */
+
+.effBadge {
+  position: absolute;
+  min-width: calc(var(--cell) * 0.26);
+  height: calc(var(--cell) * 0.26);
+  padding: 0 2px;
+  border-radius: calc(var(--cell) * 0.08);
+  font-size: calc(var(--cell) * 0.19);
+  font-weight: 800;
+  line-height: calc(var(--cell) * 0.26);
+  text-align: center;
+  color: #fff;
+  pointer-events: none;
+  font-family: "Hiragino Sans", sans-serif;
+}
+
+.effMine {
+  left: 1px;
+  bottom: 1px;
+  background: color-mix(in srgb, var(--you) 88%, #000);
+}
+
+.effOpp {
+  right: 1px;
+  top: 1px;
+  background: color-mix(in srgb, var(--ai) 88%, #000);
+}
+
 /* 星(3三などの目印) */
 .hoshi {
   position: absolute;
@@ -588,6 +617,25 @@
   .previewClose:hover { filter: brightness(1.08); }
 }
 
+/* ==== 感想戦バー(プレビューバーの金色版) ==== */
+
+.replayBar {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.replayTitle {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--accent-strong);
+  letter-spacing: 0.06em;
+}
+
+.replayClose {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
 /* ==== ヒント・注記 ==== */
 
 .hintText {
@@ -681,6 +729,8 @@
   border-color: color-mix(in srgb, var(--you) 60%, transparent);
   color: var(--you);
 }
+
+.btnWide { grid-column: 1 / -1; }
 
 .btnDangerSolid {
   background: var(--danger);
@@ -804,6 +854,89 @@
   .copyBtn:hover { border-color: var(--accent); color: var(--fg); }
 }
 
+/* ==== 形勢グラフ ==== */
+
+.graphBox {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.graphHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.graphHead h3 {
+  font-size: 0.78rem;
+  margin: 0;
+  color: var(--fg-muted);
+  letter-spacing: 0.05em;
+}
+
+.graphReadout {
+  font-size: 0.72rem;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.graph {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.graphZoneYou { fill: color-mix(in srgb, var(--you) 7%, transparent); }
+.graphZoneAi { fill: color-mix(in srgb, var(--ai) 7%, transparent); }
+
+.graphMid {
+  stroke: var(--fg-faint);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.graphZoneLabel {
+  font-size: 9px;
+  fill: var(--fg-faint);
+  font-weight: 600;
+}
+
+.graphLine {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.graphBadDot {
+  fill: var(--danger);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.graphHover {
+  stroke: var(--fg-muted);
+  stroke-width: 1;
+}
+
+.graphCurrent {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+/* ==== 棋譜リスト ==== */
+
 .kifu {
   height: clamp(140px, calc(var(--cell) * 9 - 280px), 460px);
   overflow-y: auto;
@@ -818,19 +951,51 @@
 }
 
 .kifuLine {
+  appearance: none;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
   display: flex;
   align-items: baseline;
   gap: 6px;
   white-space: nowrap;
   padding: 2px 6px;
   border-radius: 6px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .kifuLine:nth-child(even) { background: color-mix(in srgb, var(--fg) 3%, transparent); }
 
+@media (hover: hover) {
+  .kifuLine:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
+}
+
 .kifuLatest {
   background: color-mix(in srgb, var(--accent) 14%, transparent) !important;
   font-weight: 700;
+}
+
+.kifuSelected {
+  background: color-mix(in srgb, var(--accent) 26%, transparent) !important;
+  font-weight: 700;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.kifuBadMark {
+  color: var(--danger);
+  font-weight: 800;
+  font-size: 0.8rem;
+}
+
+.kifuGoodMark {
+  color: var(--you);
+  font-weight: 800;
+  font-size: 0.8rem;
 }
 
 .kifuNum {
