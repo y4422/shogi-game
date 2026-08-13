@@ -220,6 +220,38 @@ function repetitionKey(s: GameSnap): string {
   return positionToSfen(toPos(s)).split(" ").slice(0, 3).join(" ");
 }
 
+// 同一局面4回。連続王手による千日手なら王手を続けた側の反則負け。
+function repetitionResult(
+  history: HistoryEntry[], before: GameSnap, after: GameSnap
+): { winner: Player | "draw"; reason: string } | null {
+  const positions = [...history.map(e => e.before), before, after];
+  const key = repetitionKey(after);
+  const occurrences = positions
+    .map((p, i) => repetitionKey(p) === key ? i : -1)
+    .filter(i => i >= 0);
+  if (occurrences.length < 4) return null;
+
+  const start = occurrences[occurrences.length - 4];
+  const end = positions.length - 1;
+  for (const checker of [0, 1] as Player[]) {
+    let madeMove = false;
+    let continuous = true;
+    for (let i = start + 1; i <= end; i++) {
+      const mover = (1 - positions[i].turn) as Player;
+      if (mover !== checker) continue;
+      madeMove = true;
+      if (!inCheck(toPos(positions[i]))) {
+        continuous = false;
+        break;
+      }
+    }
+    if (madeMove && continuous) {
+      return { winner: (1 - checker) as Player, reason: "連続王手の千日手" };
+    }
+  }
+  return { winner: "draw", reason: "千日手" };
+}
+
 // USI の読み筋を棋譜表記に変換
 function pvToKifu(base: Position, pvUsi: string[], limit = 7): string {
   const p = clonePosition(base);
@@ -555,12 +587,9 @@ export default function ShogiGame() {
       return;
     }
     // 千日手(同一局面4回)
-    const key = repetitionKey(next);
-    const count = 1 +
-      history.filter(e => repetitionKey(e.before) === key).length +
-      (repetitionKey(game) === key ? 1 : 0);
-    if (count >= 4) {
-      setGameOver({ winner: "draw", reason: "千日手" });
+    const repetition = repetitionResult(history, game, next);
+    if (repetition) {
+      setGameOver(repetition);
       return;
     }
     if (pj) judgePlayed(pj, next);
@@ -717,8 +746,11 @@ export default function ShogiGame() {
 
   useEffect(() => () => workerRef.current?.terminate(), []);
 
+  // 棋譜を最下部へ自動スクロール(感想戦で過去の手を見ている間は動かさない)
   useEffect(() => {
+    if (replayPly !== null) return;
     kifuRef.current?.scrollTo({ top: kifuRef.current.scrollHeight });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [history]);
 
   // 決着したら結果ダイアログを開く
@@ -903,6 +935,10 @@ export default function ShogiGame() {
       Object.fromEntries(Object.entries(rec).filter(([k]) => Number(k) <= h.length));
     setEvalByPly(m => keep(m) as Record<number, number>);
     setGradeByPly(m => keep(m) as Record<number, Grade>);
+    const keptGrades = keep(gradeByPly) as Record<number, Grade>;
+    const counts = initialGradeCounts();
+    for (const grade of Object.values(keptGrades)) counts[grade]++;
+    setGradeCounts(counts);
     setLastMove(h.length > 0 ? h[h.length - 1].move : null);
   };
 

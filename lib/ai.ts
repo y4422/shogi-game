@@ -4,7 +4,7 @@ import {
   FU, HI, OU,
   typeOf, PROMOTE, DEMOTE, makePiece,
   generateMoves, legalMoves, isAttacked, findKing,
-  makeMove, unmakeMove,
+  makeMove, unmakeMove, hasAnyLegalMove,
 } from "./shogi";
 
 // 駒の価値(歩=90 基準)
@@ -236,20 +236,25 @@ export class Searcher {
   quiesce(alpha: number, beta: number, qply: number): number {
     this.nodes++;
     this.checkTime();
-    const stand = evaluate(this.pos, this.noise);
-    if (stand >= beta) return beta;
-    if (stand > alpha) alpha = stand;
-    if (qply >= QMAX) return alpha;
-
     const pos = this.pos;
     const me = pos.turn;
     const opp = (1 - me) as Player;
-    const moves = generateMoves(pos, true);
+    const check = isAttacked(pos.board, findKing(pos.board, me), opp);
+    const stand = check ? -INF : evaluate(pos, this.noise);
+    if (!check) {
+      if (stand >= beta) return beta;
+      if (stand > alpha) alpha = stand;
+      if (qply >= QMAX) return alpha;
+    }
+
+    // 王手中は取り手だけでなく、玉の移動・合駒を含む全ての応手を読む。
+    const moves = generateMoves(pos, !check);
     const board = pos.board;
     moves.sort((a, b) => VAL[typeOf(board[b.to])] - VAL[typeOf(board[a.to])]);
+    let legal = 0;
     for (const m of moves) {
       // 見込みのない取り合いの枝刈り(delta pruning)
-      if (stand + VAL[typeOf(board[m.to])] + 200 < alpha) continue;
+      if (!check && stand + VAL[typeOf(board[m.to])] + 200 < alpha) continue;
       const saveLo = this.hlo, saveHi = this.hhi;
       const cap = this.doMove(m);
       if (isAttacked(pos.board, findKing(pos.board, me), opp)) {
@@ -257,12 +262,25 @@ export class Searcher {
         this.hlo = saveLo; this.hhi = saveHi;
         continue;
       }
-      const score = -this.quiesce(-beta, -alpha, qply + 1);
-      unmakeMove(pos, m, cap);
-      this.hlo = saveLo; this.hhi = saveHi;
+      if (m.from === -1 && m.drop === FU &&
+          isAttacked(pos.board, findKing(pos.board, opp), me) &&
+          !hasAnyLegalMove(pos)) {
+        unmakeMove(pos, m, cap);
+        this.hlo = saveLo; this.hhi = saveHi;
+        continue;
+      }
+      legal++;
+      let score: number;
+      try {
+        score = -this.quiesce(-beta, -alpha, qply + 1);
+      } finally {
+        unmakeMove(pos, m, cap);
+        this.hlo = saveLo; this.hhi = saveHi;
+      }
       if (score >= beta) return beta;
       if (score > alpha) alpha = score;
     }
+    if (check && legal === 0) return -(MATE - qply);
     return alpha;
   }
 
@@ -299,8 +317,12 @@ export class Searcher {
     if (allowNull && !check && depth >= 3 && beta < MATE - 1000) {
       const R = depth > 8 ? 3 : 2;
       this.doNull();
-      const score = -this.negamax(depth - 1 - R, -beta, -beta + 1, ply + 1, false);
-      this.undoNull();
+      let score: number;
+      try {
+        score = -this.negamax(depth - 1 - R, -beta, -beta + 1, ply + 1, false);
+      } finally {
+        this.undoNull();
+      }
       if (score >= beta) return beta;
     }
 
@@ -317,25 +339,35 @@ export class Searcher {
         this.hlo = saveLo; this.hhi = saveHi;
         continue;
       }
-      let score: number;
-      if (legal === 0) {
-        score = -this.negamax(depth - 1, -beta, -alpha, ply + 1, true);
-      } else {
-        // LMR: 後方の静かな手は縮小して null window 検索
-        let r = 0;
-        if (depth >= 3 && legal >= 5 && !cap && !m.promote && !check) {
-          r = 1 + (legal >= 18 ? 1 : 0);
-        }
-        score = -this.negamax(depth - 1 - r, -alpha - 1, -alpha, ply + 1, true);
-        if (score > alpha && r > 0) {
-          score = -this.negamax(depth - 1, -alpha - 1, -alpha, ply + 1, true);
-        }
-        if (score > alpha && score < beta) {
-          score = -this.negamax(depth - 1, -beta, -alpha, ply + 1, true);
-        }
+      if (m.from === -1 && m.drop === FU &&
+          isAttacked(pos.board, findKing(pos.board, opp), me) &&
+          !hasAnyLegalMove(pos)) {
+        unmakeMove(pos, m, cap);
+        this.hlo = saveLo; this.hhi = saveHi;
+        continue;
       }
-      unmakeMove(pos, m, cap);
-      this.hlo = saveLo; this.hhi = saveHi;
+      let score: number;
+      try {
+        if (legal === 0) {
+          score = -this.negamax(depth - 1, -beta, -alpha, ply + 1, true);
+        } else {
+          // LMR: 後方の静かな手は縮小して null window 検索
+          let r = 0;
+          if (depth >= 3 && legal >= 5 && !cap && !m.promote && !check) {
+            r = 1 + (legal >= 18 ? 1 : 0);
+          }
+          score = -this.negamax(depth - 1 - r, -alpha - 1, -alpha, ply + 1, true);
+          if (score > alpha && r > 0) {
+            score = -this.negamax(depth - 1, -alpha - 1, -alpha, ply + 1, true);
+          }
+          if (score > alpha && score < beta) {
+            score = -this.negamax(depth - 1, -beta, -alpha, ply + 1, true);
+          }
+        }
+      } finally {
+        unmakeMove(pos, m, cap);
+        this.hlo = saveLo; this.hhi = saveHi;
+      }
       legal++;
       if (score > best) {
         best = score;
@@ -394,16 +426,19 @@ export function searchBestMove(pos: Position, opts: SearchOptions): SearchResult
         const saveLo = searcher.hlo, saveHi = searcher.hhi;
         const cap = searcher.doMove(m);
         let score: number;
-        if (first) {
-          score = -searcher.negamax(depth - 1, -INF, -alpha, 1, true);
-        } else {
-          score = -searcher.negamax(depth - 1, -alpha - 1, -alpha, 1, true);
-          if (score > alpha) {
+        try {
+          if (first) {
             score = -searcher.negamax(depth - 1, -INF, -alpha, 1, true);
+          } else {
+            score = -searcher.negamax(depth - 1, -alpha - 1, -alpha, 1, true);
+            if (score > alpha) {
+              score = -searcher.negamax(depth - 1, -INF, -alpha, 1, true);
+            }
           }
+        } finally {
+          unmakeMove(pos, m, cap);
+          searcher.hlo = saveLo; searcher.hhi = saveHi;
         }
-        unmakeMove(pos, m, cap);
-        searcher.hlo = saveLo; searcher.hhi = saveHi;
         if (first || score > alpha) {
           alpha = score;
           bestMove = m;
