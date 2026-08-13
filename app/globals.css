@@ -1,49 +1,202 @@
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* 盤マスの大きさ: 幅・高さ両方に収まるサイズを自動選択(上限64px) */
+  --cell: min(calc((100vw - 46px) / 9), calc((100vh - 330px) / 9), 64px);
+  --board-w: calc(var(--cell) * 9);
+
+  /* 夜のダーク(既定): 墨色 + 金 */
+  --bg: #131419;
+  --bg-glow: rgba(216, 164, 65, 0.05);
+  --surface: #1d1f27;
+  --surface-2: #262933;
+  --surface-3: #303441;
+  --fg: #ece7dc;
+  --fg-muted: rgba(236, 231, 220, 0.62);
+  --fg-faint: rgba(236, 231, 220, 0.42);
+  --line: rgba(236, 231, 220, 0.12);
+  --accent: #d9a441;
+  --accent-strong: #e8b755;
+  --accent-ink: #221708;
+  --you: #57b877;
+  --ai: #d06557;
+  --info: #6ea8fe;
+  --danger: #e06c5f;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.3);
 }
 
-@media (prefers-color-scheme: dark) {
+@media (prefers-color-scheme: light) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    /* 和紙ライト: 生成り + 漆・金 */
+    --bg: #ede7d7;
+    --bg-glow: rgba(176, 127, 36, 0.06);
+    --surface: #f9f5ea;
+    --surface-2: #f1ebdc;
+    --surface-3: #e7dfcc;
+    --fg: #2b2318;
+    --fg-muted: rgba(43, 35, 24, 0.66);
+    --fg-faint: rgba(43, 35, 24, 0.45);
+    --line: rgba(43, 35, 24, 0.14);
+    --accent: #b07f24;
+    --accent-strong: #96690f;
+    --accent-ink: #fffaf0;
+    --you: #2e8a52;
+    --ai: #bb4a3c;
+    --info: #2f6bce;
+    --danger: #c24a3c;
+    --shadow: 0 10px 26px rgba(90, 70, 40, 0.18);
+    --shadow-soft: 0 2px 8px rgba(90, 70, 40, 0.14);
   }
 }
 
-html {
-  height: 100%;
-}
-
-html,
-body {
-  max-width: 100vw;
-  overflow-x: hidden;
-}
-
-body {
-  min-height: 100%;
-  display: flex;
-  flex-direction: column;
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+@supports (height: 100dvh) {
+  :root {
+    --cell: min(calc((100vw - 46px) / 9), calc((100dvh - 330px) / 9), 64px);
+  }
 }
 
 * {
   box-sizing: border-box;
-  padding: 0;
   margin: 0;
+  padding: 0;
 }
 
-a {
-  color: inherit;
-  text-decoration: none;
+html,
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP",
+    "Yu Gothic UI", "Yu Gothic", sans-serif;
+  min-height: 100vh;
+  min-height: 100dvh;
+  -webkit-font-smoothing: antialiased;
 }
 
-@media (prefers-color-scheme: dark) {
-  html {
-    color-scheme: dark;
+body {
+  background-image:
+    radial-gradient(1100px 500px at 50% -8%, var(--bg-glow), transparent 70%),
+    radial-gradient(800px 400px at 100% 100%, var(--bg-glow), transparent 70%);
+  background-attachment: fixed;
+}
+
+button {
+  font-family: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
+}
+
+/* ==== アプリシェル ==== */
+
+.appShell {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.appHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 12px;
+  padding: 14px 16px 10px;
+  padding-top: max(14px, env(safe-area-inset-top));
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.brandMark {
+  color: var(--accent);
+  font-size: 1.5rem;
+  line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
+}
+
+.brand h1 {
+  font-family: "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  line-height: 1.2;
+}
+
+.engineBadge {
+  font-size: 0.72rem;
+  color: var(--fg-muted);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 4px 12px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.appMain {
+  flex: 1;
+  padding: 4px 10px 28px;
+}
+
+.appFooter {
+  padding: 0 16px 18px;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+}
+
+.appFooter a {
+  color: inherit;
+}
+
+.legalPage {
+  width: min(720px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 40px 0;
+  line-height: 1.8;
+}
+
+.legalPage h1,
+.legalPage h2 {
+  margin: 1.25em 0 0.5em;
+}
+
+.legalPage p {
+  margin: 0.75em 0;
+}
+
+.legalPage a {
+  color: var(--accent-strong);
+}
+
+.legalWarning {
+  padding: 12px 16px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+}
+
+@media (max-width: 619px) {
+  .appHeader {
+    padding: 10px 12px 6px;
+    gap: 8px;
+  }
+  .brand h1 { font-size: 1.2rem; }
+  .brandMark { font-size: 1.2rem; }
+  .engineBadge { font-size: 0.64rem; padding: 3px 10px; }
+  .appMain { padding: 2px 6px 20px; }
 }
