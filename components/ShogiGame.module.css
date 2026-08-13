@@ -510,6 +510,7 @@
 
 .diffLabel {
   grid-column: 1 / -1;
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -520,7 +521,9 @@
 
 .diffLabel select {
   flex: 1;
-  padding: 10px 12px;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 10px 36px 10px 12px;
   min-height: 44px;
   border-radius: 10px;
   border: 1px solid var(--line);
@@ -531,6 +534,20 @@
   font-weight: 600;
   font-family: inherit;
   touch-action: manipulation;
+}
+
+/* セレクトの下矢印(ネイティブ矢印の代わりに描画) */
+.diffLabel::after {
+  content: "";
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--fg-muted);
+  border-bottom: 2px solid var(--fg-muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
 }
 
 /* ==== 棋譜ペイン ==== */
