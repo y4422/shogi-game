@@ -409,7 +409,7 @@ export default function ShogiGame() {
   }, []);
   useEffect(() => () => coachWorkerRef.current?.terminate(), []);
 
-  // 局面をプレイヤー視点で評価(エンジン優先、なければJSワーカー)
+  // 局面をプレイヤー視点で評価(エンジン優先。失敗時はJSワーカーへフォールバック)
   const coachEvaluate = useCallback(async (
     snap: GameSnap, timeMs: number
   ): Promise<CoachSearch | null> => {
@@ -421,20 +421,22 @@ export default function ShogiGame() {
       try {
         const res = await eng.search(sfen, timeMs);
         const m = usiToMove(base, res.bestmove);
-        // エンジン評価は手番視点
-        let score: number;
-        let mateForMover = false;
-        if (res.scoreMate !== null) {
-          mateForMover = res.scoreMate > 0;
-          score = res.scoreMate > 0
-            ? 32000 - Math.abs(res.scoreMate)
-            : -32000 + Math.abs(res.scoreMate);
-        } else {
-          score = clampScore(res.scoreCp ?? 0);
+        // 評価が取れない(探索が中断された等)ときはJS探索へ落とす
+        if (m && (res.scoreCp !== null || res.scoreMate !== null)) {
+          let score: number;
+          let mateForMover = false;
+          if (res.scoreMate !== null) {
+            mateForMover = res.scoreMate > 0;
+            score = res.scoreMate > 0
+              ? 32000 - Math.abs(res.scoreMate)
+              : -32000 + Math.abs(res.scoreMate);
+          } else {
+            score = clampScore(res.scoreCp!);
+          }
+          return { sfen, move: m, score, mate: mateForMover, pv: res.pv };
         }
-        return { sfen, move: m, score, mate: mateForMover, pv: res.pv };
       } catch {
-        return null;
+        // フォールバックへ
       }
     }
     try {
@@ -728,14 +730,18 @@ export default function ShogiGame() {
   useEffect(() => {
     if (!coachOn || gameOver || thinking || game.turn !== playerColor) return;
     let cancelled = false;
+    let running = true;
     const snap = game;
     (async () => {
       const res = await coachEvaluate(snap, 500);
+      running = false;
       if (!cancelled && res) preSearchRef.current = res;
     })();
     return () => {
       cancelled = true;
-      getEngine("kp").stop();
+      // 事前探索がまだ走っているときだけ止める。無条件に stop すると、
+      // 直後に始まるコーチの事後評価やAIの探索まで殺してしまう
+      if (running) getEngine("kp").stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game, gameOver, thinking, playerColor, coachOn]);
