@@ -7,7 +7,7 @@ import {
   PROMOTE,
   typeOf, ownerOf, initialPosition, clonePosition,
   makeMove, legalMoves, inCheck, moveToKifu,
-  PIECE_KANJI,
+  PIECE_KANJI, KIFU_KANJI, squareName,
 } from "@/lib/shogi";
 import { searchBestMove, SearchResult, SearchOptions } from "@/lib/ai";
 import { positionToSfen, usiToMove } from "@/lib/usi";
@@ -244,6 +244,8 @@ export default function ShogiGame() {
   const workerRef = useRef<Worker | null>(null);
   const kifuRef = useRef<HTMLDivElement>(null);
   const lastInfoAt = useRef(0);
+  const gameRef = useRef(game);
+  gameRef.current = game;
 
   const aiColor = (1 - playerColor) as Player;
   const flip = playerColor === 1;
@@ -430,6 +432,19 @@ export default function ShogiGame() {
     if (gameOver) setResultOpen(true);
   }, [gameOver]);
 
+  // Esc でダイアログ・選択を閉じる
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setConfirm(null);
+      setResultOpen(false);
+      setPending(null);
+      setSelected(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const playerTurn = !gameOver && !thinking && game.turn === playerColor;
 
   // 選択中の駒から行ける先
@@ -557,17 +572,19 @@ export default function ShogiGame() {
     setHintBusy(true);
     try {
       const base = toPos(game);
+      const baseSfen = positionToSfen(base);
       const eng = getEngine("kp");
       const ok = await eng.init();
       let m: Move | null = null;
       if (ok) {
-        const res = await eng.search(positionToSfen(base), 800);
+        const res = await eng.search(baseSfen, 800);
         m = usiToMove(base, res.bestmove);
       } else {
         const res = searchBestMove(base, { timeMs: 800, maxDepth: 6 });
         m = res.move;
       }
-      setHintMove(m);
+      // 探索中に局面が変わっていたら(先に指した・投了・再対局など)捨てる
+      if (positionToSfen(toPos(gameRef.current)) === baseSfen) setHintMove(m);
     } finally {
       setHintBusy(false);
     }
@@ -685,7 +702,9 @@ export default function ShogiGame() {
         <div
           className={`${styles.status} ${
             gameOver
-              ? gameOver.winner === playerColor ? styles.statusWin : styles.statusLose
+              ? gameOver.winner === playerColor ? styles.statusWin
+                : gameOver.winner === "draw" ? ""
+                  : styles.statusLose
               : thinking ? styles.statusThinking
                 : check ? styles.statusCheck : styles.statusYou
           }`}
@@ -725,11 +744,19 @@ export default function ShogiGame() {
                   const isSel = selected?.kind === "board" && selected.sq === idx;
                   const isLast = lastMove?.to === idx || (lastMove?.from ?? -2) === idx;
                   const isHint = hintMove !== null && (hintMove.to === idx || hintMove.from === idx);
+                  const cellLabel =
+                    squareName(idx) +
+                    (p
+                      ? ` ${ownerOf(p) === playerColor ? "あなた" : "AI"}の${KIFU_KANJI[typeOf(p)]}`
+                      : " 空きマス") +
+                    (isDest ? " 移動できます" : isSel ? " 選択中" : "");
                   return (
-                    <div
+                    <button
+                      type="button"
                       key={vi}
                       className={`${styles.cell} ${isLast ? styles.lastMove : ""} ${isDest ? styles.dest : ""} ${isSel ? styles.selCell : ""} ${isHint ? styles.hintCell : ""}`}
                       onClick={() => onCellClick(idx)}
+                      aria-label={cellLabel}
                     >
                       {p !== 0 && (
                         <span
@@ -745,7 +772,7 @@ export default function ShogiGame() {
                         </span>
                       )}
                       {isDest && p === 0 && <span className={styles.dot} />}
-                    </div>
+                    </button>
                   );
                 })}
                 <span className={`${styles.hoshi} ${styles.hoshiTL}`} aria-hidden />
@@ -865,10 +892,16 @@ export default function ShogiGame() {
 
       {confirm && (
         <div className={styles.overlay} onClick={() => setConfirm(null)}>
-          <div className={styles.dialog} onClick={e => e.stopPropagation()}>
+          <div
+            className={styles.dialog}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={confirm.message}
+          >
             <p className={styles.dialogTitle}>{confirm.message}</p>
             <div className={styles.confirmButtons}>
-              <button className={styles.btn} onClick={() => setConfirm(null)}>
+              <button className={styles.btn} onClick={() => setConfirm(null)} autoFocus>
                 やめる
               </button>
               <button
@@ -888,12 +921,18 @@ export default function ShogiGame() {
 
       {pending && (
         <div className={styles.overlay}>
-          <div className={styles.dialog}>
+          <div
+            className={styles.dialog}
+            role="dialog"
+            aria-modal="true"
+            aria-label="成りますか?"
+          >
             <p className={styles.dialogTitle}>成りますか?</p>
             <div className={styles.promoChoices}>
               <button
                 className={styles.promoChoice}
                 onClick={() => applyMove(pending.find(m => m.promote)!)}
+                autoFocus
               >
                 <span className={`${styles.promoPiece} ${styles.promoted}`}>
                   {PIECE_KANJI[PROMOTE[pendingBase]]}
@@ -914,7 +953,13 @@ export default function ShogiGame() {
 
       {gameOver && resultOpen && (
         <div className={styles.overlay} onClick={() => setResultOpen(false)}>
-          <div className={styles.dialog} onClick={e => e.stopPropagation()}>
+          <div
+            className={styles.dialog}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="対局結果"
+          >
             <p
               className={`${styles.resultIcon} ${
                 gameOver.winner === "draw"
@@ -942,7 +987,11 @@ export default function ShogiGame() {
             </p>
             <p className={styles.resultReason}>{gameOver.reason} — {history.length}手</p>
             <div className={styles.resultButtons}>
-              <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={() => restart(0)}>
+              <button
+                className={`${styles.btn} ${styles.btnPrimary}`}
+                onClick={() => restart(0)}
+                autoFocus
+              >
                 <span className={styles.btnMark}>☗</span>先手で再戦
               </button>
               <button className={styles.btn} onClick={() => restart(1)}>

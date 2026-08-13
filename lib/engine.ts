@@ -112,7 +112,8 @@ export class YaneuraOuEngine {
       this.onProgress?.("init", null);
       await withTimeout(this.cmdWait("usi", "usiok"), 15000);
       const threads = Math.min(8, Math.max(2, (navigator.hardwareConcurrency || 4) - 2));
-      this.post("setoption name USI_Hash value 256");
+      // モバイル端末のメモリ圧迫を避けるため控えめに(0.6秒探索には十分)
+      this.post("setoption name USI_Hash value 128");
       this.post(`setoption name Threads value ${threads}`);
       this.post("setoption name NetworkDelay value 0");
       this.post("setoption name NetworkDelay2 value 0");

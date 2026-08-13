@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="wood" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#f9e7bd"/>
+      <stop offset="0.55" stop-color="#eed09a"/>
+      <stop offset="1" stop-color="#e2bd7c"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#1d1f27"/>
+  <path d="M32 7 L46.5 16 L52 57 L12 57 L17.5 16 Z" fill="url(#wood)" stroke="#3c2712" stroke-width="1.5"/>
+  <text x="32" y="46" text-anchor="middle" font-family="'Hiragino Mincho ProN','Yu Mincho',serif" font-weight="700" font-size="28" fill="#241505">王</text>
+</svg>
