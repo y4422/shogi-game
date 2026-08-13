@@ -89,7 +89,7 @@ interface CoachSearch {
 }
 
 interface PendingJudge {
-  pre: CoachSearch;
+  pre: CoachSearch | null; // 先読み結果。間に合わなかったときは判定時に遡って評価する
   playedMove: Move;
   playedNotation: string;
   baseSnap: GameSnap; // プレイヤーが指す直前の局面
@@ -489,10 +489,16 @@ export default function ShogiGame() {
   const judgePlayed = useCallback((pj: PendingJudge, next: GameSnap) => {
     const sess = coachSessionRef.current;
     (async () => {
+      const { playedMove, playedNotation, baseSnap, prevTo, ply } = pj;
+      // 先読みが間に合っていなければ、指す前の局面を遡って評価する
+      let pre = pj.pre;
+      if (!pre) {
+        pre = await coachEvaluate(baseSnap, 500);
+        if (!pre || coachSessionRef.current !== sess) return;
+      }
       const post = await coachEvaluate(next, 400);
       if (!post || coachSessionRef.current !== sess) return;
       const playedScore = -post.score; // 手番(相手)視点 → プレイヤー視点
-      const { pre, playedMove, playedNotation, baseSnap, prevTo, ply } = pj;
       const basePos = toPos(baseSnap);
       const isBest = pre.move !== null && sameMove(pre.move, playedMove);
       const loss = Math.max(0, pre.score - playedScore);
@@ -506,21 +512,22 @@ export default function ShogiGame() {
       recordEval(ply, baseSnap.turn === 0 ? playedScore : -playedScore);
       setGradeByPly(m => ({ ...m, [ply]: grade }));
       setGradeCounts(c => ({ ...c, [grade]: c[grade] + 1 }));
-      if (grade === "ok") return;
 
+      const lecture = grade === "dubious" || grade === "bad" || grade === "blunder";
       const bestNotation = pre.move ? moveToKifu(basePos, pre.move, prevTo) : "";
       // 読み筋は「最善手を指した(=この先の展開)」か「指導(=おすすめ手の展開)」のときだけ。
       // 好手どまりの手に別の手の読み筋を添えると紛らわしい
-      const showPv = isBest || grade === "dubious" || grade === "bad" || grade === "blunder";
+      const showPv = isBest || lecture;
       const pvPreview = showPv && pre.pv.length > 0
         ? buildPvPreview(baseSnap, pre.pv, prevTo) : null;
-      const reason = pre.move && grade !== "best" && grade !== "good"
-        ? moveReason(baseSnap, pre.move) : null;
+      const reason = pre.move && lecture ? moveReason(baseSnap, pre.move) : null;
       let text: string;
       if (grade === "best") {
         text = "最善手！すばらしい読みです";
       } else if (grade === "good") {
         text = "いい手です！";
+      } else if (grade === "ok") {
+        text = "まずまずの手です";
       } else if (grade === "blunder" && pre.mate) {
         text = `実はここ、${bestNotation}から詰みがありました！`;
       } else if (grade === "blunder" || grade === "bad") {
@@ -554,20 +561,19 @@ export default function ShogiGame() {
     const pos = toPos(game);
     const notation = moveToKifu(pos, m, lastMove?.to ?? -1);
     const mover = game.turn;
-    // コーチ: 事前探索と同じ局面からプレイヤーが指したなら判定対象にする
+    // コーチ: プレイヤーの手は必ず判定する。先読みが同じ局面ならそれを使い、
+    // 間に合っていなければ判定時に遡って評価する
     let pj: PendingJudge | null = null;
     if (coachOn && mover === playerColor) {
       const pre = preSearchRef.current;
-      if (pre && pre.sfen === positionToSfen(pos)) {
-        pj = {
-          pre,
-          playedMove: m,
-          playedNotation: notation,
-          baseSnap: game,
-          prevTo: lastMove?.to ?? -1,
-          ply: history.length + 1,
-        };
-      }
+      pj = {
+        pre: pre && pre.sfen === positionToSfen(pos) ? pre : null,
+        playedMove: m,
+        playedNotation: notation,
+        baseSnap: game,
+        prevTo: lastMove?.to ?? -1,
+        ply: history.length + 1,
+      };
     }
     makeMove(pos, m);
     const next = fromPos(pos);
@@ -1344,9 +1350,11 @@ export default function ShogiGame() {
             className={`${styles.coachCard} ${
               advice.grade === "best" || advice.grade === "good"
                 ? styles.coachPraise
-                : advice.grade === "dubious"
-                  ? styles.coachWarn
-                  : styles.coachBad
+                : advice.grade === "ok"
+                  ? styles.coachNeutral
+                  : advice.grade === "dubious"
+                    ? styles.coachWarn
+                    : styles.coachBad
             }`}
             role="status"
           >
@@ -1374,7 +1382,8 @@ export default function ShogiGame() {
                   盤で再生
                 </button>
               )}
-              {advice.grade !== "best" && advice.grade !== "good" && advice.bestMove && (
+              {(advice.grade === "dubious" || advice.grade === "bad" || advice.grade === "blunder") &&
+                advice.bestMove && (
                 <button
                   className={styles.coachBtn}
                   onClick={tryBest}

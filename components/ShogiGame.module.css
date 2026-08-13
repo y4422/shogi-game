@@ -452,8 +452,11 @@
 }
 
 .coachPraise { border-left-color: var(--you); }
+.coachNeutral { border-left-color: var(--fg-faint); }
 .coachWarn { border-left-color: var(--accent); }
 .coachBad { border-left-color: var(--danger); }
+
+.coachNeutral .coachChip { background: var(--fg-faint); }
 
 .coachHead {
   display: flex;
