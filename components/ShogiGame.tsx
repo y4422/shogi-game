@@ -1466,6 +1466,11 @@ export default function ShogiGame() {
               手合「{HANDICAPS[handicap].label}」は次の対局から適用されます
             </div>
           )}
+          {handicap !== "none" && (
+            <div className={styles.handicapNote}>
+              駒落ちでは、駒を落とすAI(上手)が先に指します
+            </div>
+          )}
         </div>
 
         <div className={styles.kifuPane}>
