@@ -403,6 +403,191 @@
     drop-shadow(0 1.5px 1.5px rgba(0, 0, 0, 0.4));
 }
 
+/* ==== コーチモード ==== */
+
+.coachCard {
+  width: 100%;
+  max-width: calc(var(--board-w) + 30px);
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  box-shadow: var(--shadow-soft);
+  animation: coachIn 0.2s ease-out;
+}
+
+@keyframes coachIn {
+  from { transform: translateY(6px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.coachPraise { border-left-color: var(--you); }
+.coachWarn { border-left-color: var(--accent); }
+.coachBad { border-left-color: var(--danger); }
+
+.coachHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.coachChip {
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 2px 10px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--fg-muted);
+}
+
+.coachPraise .coachChip { background: var(--you); }
+.coachWarn .coachChip { background: var(--accent); color: var(--accent-ink); }
+.coachBad .coachChip { background: var(--danger); }
+
+.coachTitle {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--fg-muted);
+  letter-spacing: 0.06em;
+}
+
+.coachClose {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--fg-faint);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 4px 6px;
+  border-radius: 6px;
+  touch-action: manipulation;
+}
+
+@media (hover: hover) {
+  .coachClose:hover { color: var(--fg); }
+}
+
+.coachText {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.coachReason {
+  font-weight: 600;
+  color: var(--fg-muted);
+  margin-left: 4px;
+  font-size: 0.84rem;
+}
+
+.coachPv {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+
+.coachActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.coachActions:empty { display: none; }
+
+.coachBtn {
+  padding: 7px 14px;
+  min-height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: border-color 0.15s ease;
+}
+
+@media (hover: hover) {
+  .coachBtn:hover:not(:disabled) { border-color: var(--accent); }
+}
+
+.coachBtn:disabled { opacity: 0.4; cursor: default; }
+
+/* ==== 読み筋プレビュー ==== */
+
+.previewBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
+  max-width: calc(var(--board-w) + 30px);
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--info) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--info) 40%, transparent);
+  box-shadow: var(--shadow-soft);
+}
+
+.previewTitle {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--info);
+}
+
+.previewStep {
+  font-size: 0.84rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.previewButtons {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  align-items: center;
+}
+
+.previewBtn {
+  width: 40px;
+  min-height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: 0.8rem;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.previewBtn:disabled { opacity: 0.35; cursor: default; }
+
+@media (hover: hover) {
+  .previewBtn:hover:not(:disabled) { border-color: var(--info); }
+}
+
+.previewClose {
+  padding: 7px 12px;
+  min-height: 36px;
+  border-radius: 8px;
+  border: none;
+  background: var(--info);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+@media (hover: hover) {
+  .previewClose:hover { filter: brightness(1.08); }
+}
+
 /* ==== ヒント・注記 ==== */
 
 .hintText {
@@ -491,6 +676,11 @@
 }
 
 .btnDanger { color: var(--danger); }
+
+.btnToggleOn {
+  border-color: color-mix(in srgb, var(--you) 60%, transparent);
+  color: var(--you);
+}
 
 .btnDangerSolid {
   background: var(--danger);
@@ -806,7 +996,17 @@
 .resultReason {
   color: var(--fg-muted);
   font-size: 0.88rem;
-  margin: 0 0 18px;
+  margin: 0 0 10px;
+}
+
+.resultGrades {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--fg-muted);
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 0 0 16px;
 }
 
 .resultButtons {

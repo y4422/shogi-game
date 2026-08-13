@@ -6,11 +6,11 @@ import {
   FU, KY, KE, GI, KI, KA, HI, OU, TO, NY, NK, NG, UM, RY,
   PROMOTE,
   typeOf, ownerOf, initialPosition, clonePosition,
-  makeMove, legalMoves, inCheck, moveToKifu,
+  makeMove, legalMoves, inCheck, moveToKifu, sameMove,
   PIECE_KANJI, KIFU_KANJI, squareName,
 } from "@/lib/shogi";
 import { searchBestMove, SearchResult, SearchOptions } from "@/lib/ai";
-import { positionToSfen, usiToMove } from "@/lib/usi";
+import { positionToSfen, usiToMove, moveToUsi } from "@/lib/usi";
 import { getEngine, EngineVariant, EngineInfo } from "@/lib/engine";
 import styles from "./ShogiGame.module.css";
 
@@ -59,6 +59,94 @@ interface EvalState {
   senteCp: number | null;
   mate: { side: Player; in: number } | null;
   pvText: string;
+}
+
+// ---- コーチモード ----
+
+type Grade = "best" | "good" | "ok" | "dubious" | "bad" | "blunder";
+
+const GRADE_INFO: Record<Grade, { label: string; order: number }> = {
+  best: { label: "最善", order: 0 },
+  good: { label: "好手", order: 1 },
+  ok: { label: "まずまず", order: 2 },
+  dubious: { label: "疑問手", order: 3 },
+  bad: { label: "悪手", order: 4 },
+  blunder: { label: "大悪手", order: 5 },
+};
+
+const initialGradeCounts = (): Record<Grade, number> =>
+  ({ best: 0, good: 0, ok: 0, dubious: 0, bad: 0, blunder: 0 });
+
+// 詰みを含む評価値を ±32000 に収めた「プレイヤー視点」スコア
+const clampScore = (s: number) => Math.max(-32000, Math.min(32000, s));
+
+interface CoachSearch {
+  sfen: string; // 探索した局面(手番=プレイヤー)
+  move: Move | null;
+  score: number; // プレイヤー視点
+  mate: boolean; // プレイヤーに詰みがある
+  pv: string[]; // USI
+}
+
+interface PendingJudge {
+  pre: CoachSearch;
+  playedMove: Move;
+  playedNotation: string;
+  baseSnap: GameSnap; // プレイヤーが指す直前の局面
+  prevTo: number; // 「同」表記用
+}
+
+interface PvPreview {
+  snaps: GameSnap[];
+  moves: Move[];
+  notations: string[];
+  idx: number;
+}
+
+interface CoachAdvice {
+  grade: Grade;
+  text: string;
+  reason: string | null;
+  pvText: string;
+  preview: Omit<PvPreview, "idx"> | null;
+  bestMove: Move | null;
+  bestNotation: string;
+  baseSnap: GameSnap;
+}
+
+// 読み筋を盤上再生できる形に展開(最大5手)
+function buildPvPreview(
+  baseSnap: GameSnap, pvUsi: string[], prevTo: number
+): Omit<PvPreview, "idx"> | null {
+  const p = toPos(baseSnap);
+  const snaps: GameSnap[] = [baseSnap];
+  const moves: Move[] = [];
+  const notations: string[] = [];
+  let pt = prevTo;
+  for (const usi of pvUsi.slice(0, 5)) {
+    const m = usiToMove(p, usi);
+    if (!m) break;
+    notations.push(moveToKifu(p, m, pt));
+    pt = m.to;
+    makeMove(p, m);
+    moves.push(m);
+    snaps.push(fromPos(p));
+  }
+  return moves.length > 0 ? { snaps, moves, notations } : null;
+}
+
+// おすすめ手の「理由」をルールから機械的に説明
+function moveReason(baseSnap: GameSnap, m: Move): string | null {
+  const pos = toPos(baseSnap);
+  const target = pos.board[m.to];
+  const clone = clonePosition(pos);
+  makeMove(clone, m);
+  const givesCheck = inCheck(clone);
+  if (target) return `${KIFU_KANJI[typeOf(target)]}を取れる手です`;
+  if (givesCheck) return "王手をかける手です";
+  if (m.promote) return "駒が成って強くなる手です";
+  if (m.from === -1) return "持ち駒を活用する手です";
+  return null;
 }
 
 const HAND_ORDER = [HI, 6, 5, 4, 3, 2, FU]; // 飛角金銀桂香歩
@@ -241,11 +329,160 @@ export default function ShogiGame() {
   const [hintMove, setHintMove] = useState<Move | null>(null);
   const [hintBusy, setHintBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [coachOn, setCoachOn] = useState(true);
+  const [advice, setAdvice] = useState<CoachAdvice | null>(null);
+  const [preview, setPreview] = useState<PvPreview | null>(null);
+  const [gradeCounts, setGradeCounts] = useState<Record<Grade, number>>(initialGradeCounts);
   const workerRef = useRef<Worker | null>(null);
   const kifuRef = useRef<HTMLDivElement>(null);
   const lastInfoAt = useRef(0);
   const gameRef = useRef(game);
   gameRef.current = game;
+  const preSearchRef = useRef<CoachSearch | null>(null);
+  const coachSessionRef = useRef(0); // 待った/再対局で古い判定を無効化する世代カウンタ
+  const coachWorkerRef = useRef<Worker | null>(null);
+  const coachChainRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  // コーチ設定を保存・復元
+  useEffect(() => {
+    const saved = localStorage.getItem("shogi-coach");
+    if (saved !== null) setCoachOn(saved !== "0");
+  }, []);
+  const toggleCoach = () => {
+    setCoachOn(v => {
+      localStorage.setItem("shogi-coach", v ? "0" : "1");
+      if (v) {
+        setAdvice(null);
+        setPreview(null);
+        coachSessionRef.current++;
+      }
+      return !v;
+    });
+  };
+
+  // エンジンが使えない環境用: コーチ専用のJS探索ワーカー(直列化して使い回す)
+  const coachJsSearch = useCallback((snap: GameSnap, timeMs: number) => {
+    const run = coachChainRef.current.then(
+      () => new Promise<SearchResult>((resolve, reject) => {
+        try {
+          if (!coachWorkerRef.current) {
+            coachWorkerRef.current = new Worker(new URL("../lib/ai.worker.ts", import.meta.url));
+          }
+          const w = coachWorkerRef.current;
+          w.onmessage = (e: MessageEvent<SearchResult>) => resolve(e.data);
+          w.onerror = () => {
+            coachWorkerRef.current?.terminate();
+            coachWorkerRef.current = null;
+            reject(new Error("coach worker error"));
+          };
+          w.postMessage({
+            board: snap.board, hands: snap.hands, turn: snap.turn,
+            opts: { timeMs, maxDepth: 6 },
+          });
+        } catch (e) {
+          reject(e);
+        }
+      })
+    );
+    coachChainRef.current = run.catch(() => {});
+    return run;
+  }, []);
+  useEffect(() => () => coachWorkerRef.current?.terminate(), []);
+
+  // 局面をプレイヤー視点で評価(エンジン優先、なければJSワーカー)
+  const coachEvaluate = useCallback(async (
+    snap: GameSnap, timeMs: number
+  ): Promise<CoachSearch | null> => {
+    const base = toPos(snap);
+    const sfen = positionToSfen(base);
+    const eng = getEngine("kp");
+    const ok = await eng.init();
+    if (ok) {
+      try {
+        const res = await eng.search(sfen, timeMs);
+        const m = usiToMove(base, res.bestmove);
+        // エンジン評価は手番視点
+        let score: number;
+        let mateForMover = false;
+        if (res.scoreMate !== null) {
+          mateForMover = res.scoreMate > 0;
+          score = res.scoreMate > 0
+            ? 32000 - Math.abs(res.scoreMate)
+            : -32000 + Math.abs(res.scoreMate);
+        } else {
+          score = clampScore(res.scoreCp ?? 0);
+        }
+        return { sfen, move: m, score, mate: mateForMover, pv: res.pv };
+      } catch {
+        return null;
+      }
+    }
+    try {
+      const r = await coachJsSearch(snap, timeMs);
+      return {
+        sfen,
+        move: r.move,
+        score: clampScore(r.score),
+        mate: r.score > 90_000,
+        pv: r.move ? [moveToUsi(r.move)] : [],
+      };
+    } catch {
+      return null;
+    }
+  }, [coachJsSearch]);
+
+  // プレイヤーの指した手を判定して助言カードを出す(AIの応答と並行して進む)
+  const judgePlayed = useCallback((pj: PendingJudge, next: GameSnap) => {
+    const sess = coachSessionRef.current;
+    (async () => {
+      const post = await coachEvaluate(next, 400);
+      if (!post || coachSessionRef.current !== sess) return;
+      const playedScore = -post.score; // 手番(相手)視点 → プレイヤー視点
+      const { pre, playedMove, playedNotation, baseSnap, prevTo } = pj;
+      const basePos = toPos(baseSnap);
+      const isBest = pre.move !== null && sameMove(pre.move, playedMove);
+      const loss = Math.max(0, pre.score - playedScore);
+      const grade: Grade =
+        isBest || loss <= 30 ? "best"
+          : loss <= 100 ? "good"
+            : loss <= 250 ? "ok"
+              : loss <= 600 ? "dubious"
+                : loss <= 1200 ? "bad" : "blunder";
+      setGradeCounts(c => ({ ...c, [grade]: c[grade] + 1 }));
+      if (grade === "ok") return;
+
+      const bestNotation = pre.move ? moveToKifu(basePos, pre.move, prevTo) : "";
+      // 読み筋は「最善手を指した(=この先の展開)」か「指導(=おすすめ手の展開)」のときだけ。
+      // 好手どまりの手に別の手の読み筋を添えると紛らわしい
+      const showPv = isBest || grade === "dubious" || grade === "bad" || grade === "blunder";
+      const pvPreview = showPv && pre.pv.length > 0
+        ? buildPvPreview(baseSnap, pre.pv, prevTo) : null;
+      const reason = pre.move && grade !== "best" && grade !== "good"
+        ? moveReason(baseSnap, pre.move) : null;
+      let text: string;
+      if (grade === "best") {
+        text = "最善手！すばらしい読みです";
+      } else if (grade === "good") {
+        text = "いい手です！";
+      } else if (grade === "blunder" && pre.mate) {
+        text = `実はここ、${bestNotation}から詰みがありました！`;
+      } else if (grade === "blunder" || grade === "bad") {
+        text = `${playedNotation}は損だったかも。おすすめは${bestNotation}でした`;
+      } else {
+        text = `悪くない手ですが、${bestNotation}ならもっと良かったようです`;
+      }
+      setAdvice({
+        grade,
+        text,
+        reason,
+        pvText: pvPreview ? pvPreview.notations.join(" ") : "",
+        preview: pvPreview,
+        bestMove: pre.move,
+        bestNotation,
+        baseSnap,
+      });
+    })();
+  }, [coachEvaluate]);
 
   const aiColor = (1 - playerColor) as Player;
   const flip = playerColor === 1;
@@ -260,6 +497,20 @@ export default function ShogiGame() {
     const pos = toPos(game);
     const notation = moveToKifu(pos, m, lastMove?.to ?? -1);
     const mover = game.turn;
+    // コーチ: 事前探索と同じ局面からプレイヤーが指したなら判定対象にする
+    let pj: PendingJudge | null = null;
+    if (coachOn && mover === playerColor) {
+      const pre = preSearchRef.current;
+      if (pre && pre.sfen === positionToSfen(pos)) {
+        pj = {
+          pre,
+          playedMove: m,
+          playedNotation: notation,
+          baseSnap: game,
+          prevTo: lastMove?.to ?? -1,
+        };
+      }
+    }
     makeMove(pos, m);
     const next = fromPos(pos);
     setHistory(h => [...h, { before: game, move: m, notation }]);
@@ -268,6 +519,11 @@ export default function ShogiGame() {
     setSelected(null);
     setPending(null);
     setHintMove(null);
+    // 助言は「自分が次を指すまで」残す(AIの応手では消さない)
+    if (mover === playerColor) {
+      setAdvice(null);
+      setPreview(null);
+    }
     if (legalMoves(pos).length === 0) {
       setGameOver({ winner: mover, reason: inCheck(pos) ? "詰み" : "指せる手なし" });
       return;
@@ -279,8 +535,10 @@ export default function ShogiGame() {
       (repetitionKey(game) === key ? 1 : 0);
     if (count >= 4) {
       setGameOver({ winner: "draw", reason: "千日手" });
+      return;
     }
-  }, [game, lastMove, history]);
+    if (pj) judgePlayed(pj, next);
+  }, [game, lastMove, history, coachOn, playerColor, judgePlayed]);
 
   // エンジンの評価値(エンジン手番視点)を先手視点に直して表示用に保存
   const updateEval = useCallback((info: EngineInfo, engineTurn: Player, base: Position) => {
@@ -432,6 +690,23 @@ export default function ShogiGame() {
     if (gameOver) setResultOpen(true);
   }, [gameOver]);
 
+  // コーチ: プレイヤーの手番中に最善手を先読みしておく(エンジンは空いている)
+  useEffect(() => {
+    if (!coachOn || gameOver || thinking || game.turn !== playerColor) return;
+    let cancelled = false;
+    const snap = game;
+    (async () => {
+      const res = await coachEvaluate(snap, 500);
+      if (!cancelled && res) preSearchRef.current = res;
+    })();
+    return () => {
+      cancelled = true;
+      getEngine("kp").stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game, gameOver, thinking, playerColor, coachOn]);
+
+
   // Esc でダイアログ・選択を閉じる
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -440,6 +715,7 @@ export default function ShogiGame() {
       setResultOpen(false);
       setPending(null);
       setSelected(null);
+      setPreview(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -463,7 +739,31 @@ export default function ShogiGame() {
     return map;
   }, [selected, legal, playerTurn]);
 
+  // 読み筋プレビューの操作
+  const openPreview = () => {
+    if (!advice?.preview) return;
+    setSelected(null);
+    setPreview({ ...advice.preview, idx: 1 });
+  };
+  const closePreview = () => setPreview(null);
+  const stepPreview = (d: number) => {
+    setPreview(p => {
+      if (!p) return p;
+      const idx = Math.max(0, Math.min(p.snaps.length - 1, p.idx + d));
+      return { ...p, idx };
+    });
+  };
+
+  // 「試してみる」= 待ったで戻り、おすすめ手をハイライト
+  const tryBest = () => {
+    if (!advice || thinking) return;
+    const best = advice.bestMove;
+    undo();
+    setHintMove(best);
+  };
+
   const onCellClick = (idx: number) => {
+    if (preview) return;
     if (!playerTurn || pending) return;
     const options = dests.get(idx);
     if (options && options.length > 0) {
@@ -480,6 +780,7 @@ export default function ShogiGame() {
   };
 
   const onHandClick = (owner: Player, piece: number) => {
+    if (preview) return;
     if (!playerTurn || pending || owner !== playerColor) return;
     if (game.hands[playerColor][piece] <= 0) return;
     setSelected(prev =>
@@ -506,6 +807,11 @@ export default function ShogiGame() {
     setEvalState(null);
     setHintMove(null);
     setThinking(false);
+    setAdvice(null);
+    setPreview(null);
+    setGradeCounts(initialGradeCounts());
+    preSearchRef.current = null;
+    coachSessionRef.current++;
   };
 
   const undo = () => {
@@ -525,6 +831,9 @@ export default function ShogiGame() {
     setSelected(null);
     setPending(null);
     setHintMove(null);
+    setAdvice(null);
+    setPreview(null);
+    coachSessionRef.current++;
     setLastMove(h.length > 0 ? h[h.length - 1].move : null);
   };
 
@@ -629,10 +938,14 @@ export default function ShogiGame() {
     );
   };
 
+  // プレビュー中は読み筋の局面を表示する
+  const view = preview ? preview.snaps[preview.idx] : game;
+  const previewMove = preview && preview.idx > 0 ? preview.moves[preview.idx - 1] : null;
+
   const renderHand = (owner: Player) => {
-    const hand = game.hands[owner];
+    const hand = view.hands[owner];
     const isPlayer = owner === playerColor;
-    const active = !gameOver && game.turn === owner;
+    const active = !preview && !gameOver && game.turn === owner;
     return (
       <div
         className={`${styles.hand} ${isPlayer ? styles.handMine : styles.handOpp} ${active ? styles.handActive : ""}`}
@@ -729,6 +1042,40 @@ export default function ShogiGame() {
 
         {renderHand(aiColor)}
 
+        {preview && (
+          <div className={styles.previewBar}>
+            <span className={styles.previewTitle}>
+              もし{advice?.bestNotation}なら…
+            </span>
+            <span className={styles.previewStep}>
+              {preview.idx === 0
+                ? "指す前"
+                : `${preview.idx}/${preview.moves.length}手 ${preview.notations[preview.idx - 1]}`}
+            </span>
+            <span className={styles.previewButtons}>
+              <button
+                className={styles.previewBtn}
+                onClick={() => stepPreview(-1)}
+                disabled={preview.idx === 0}
+                aria-label="1手戻る"
+              >
+                ◀
+              </button>
+              <button
+                className={styles.previewBtn}
+                onClick={() => stepPreview(1)}
+                disabled={preview.idx >= preview.snaps.length - 1}
+                aria-label="1手進む"
+              >
+                ▶
+              </button>
+              <button className={styles.previewClose} onClick={closePreview}>
+                対局に戻る
+              </button>
+            </span>
+          </div>
+        )}
+
         <div className={styles.boardArea}>
           <div className={styles.fileLabels}>
             {files.map(f => <span key={f}>{f}</span>)}
@@ -739,11 +1086,13 @@ export default function ShogiGame() {
                 {Array.from({ length: 81 }, (_, vi) => {
                   const vr = (vi / 9) | 0, vc = vi % 9;
                   const idx = flip ? (8 - vr) * 9 + (8 - vc) : vr * 9 + vc;
-                  const p = game.board[idx];
-                  const isDest = dests.has(idx);
-                  const isSel = selected?.kind === "board" && selected.sq === idx;
-                  const isLast = lastMove?.to === idx || (lastMove?.from ?? -2) === idx;
-                  const isHint = hintMove !== null && (hintMove.to === idx || hintMove.from === idx);
+                  const p = view.board[idx];
+                  const isDest = !preview && dests.has(idx);
+                  const isSel = !preview && selected?.kind === "board" && selected.sq === idx;
+                  const isLast = preview
+                    ? previewMove !== null && (previewMove.to === idx || previewMove.from === idx)
+                    : lastMove?.to === idx || (lastMove?.from ?? -2) === idx;
+                  const isHint = !preview && hintMove !== null && (hintMove.to === idx || hintMove.from === idx);
                   const cellLabel =
                     squareName(idx) +
                     (p
@@ -789,6 +1138,54 @@ export default function ShogiGame() {
 
         {renderHand(playerColor)}
 
+        {advice && !preview && (
+          <div
+            className={`${styles.coachCard} ${
+              advice.grade === "best" || advice.grade === "good"
+                ? styles.coachPraise
+                : advice.grade === "dubious"
+                  ? styles.coachWarn
+                  : styles.coachBad
+            }`}
+            role="status"
+          >
+            <div className={styles.coachHead}>
+              <span className={styles.coachChip}>{GRADE_INFO[advice.grade].label}</span>
+              <span className={styles.coachTitle}>コーチ</span>
+              <button
+                className={styles.coachClose}
+                onClick={() => setAdvice(null)}
+                aria-label="コーチの助言を閉じる"
+              >
+                ✕
+              </button>
+            </div>
+            <p className={styles.coachText}>
+              {advice.text}
+              {advice.reason && <span className={styles.coachReason}>({advice.reason})</span>}
+            </p>
+            {advice.pvText && (
+              <p className={styles.coachPv}>読み筋: {advice.pvText}</p>
+            )}
+            <div className={styles.coachActions}>
+              {advice.preview && (
+                <button className={styles.coachBtn} onClick={openPreview}>
+                  盤で再生
+                </button>
+              )}
+              {advice.grade !== "best" && advice.grade !== "good" && advice.bestMove && (
+                <button
+                  className={styles.coachBtn}
+                  onClick={tryBest}
+                  disabled={thinking || history.length === 0}
+                >
+                  試してみる
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {hintMove && (
           <div className={styles.hintText}>
             <IconBulb className={styles.inlineIcon} />
@@ -818,6 +1215,13 @@ export default function ShogiGame() {
           </button>
           <button className={`${styles.btn} ${styles.btnDanger}`} onClick={requestResign} disabled={!!gameOver}>
             投了
+          </button>
+          <button
+            className={`${styles.btn} ${coachOn ? styles.btnToggleOn : ""}`}
+            onClick={toggleCoach}
+            aria-pressed={coachOn}
+          >
+            コーチ {coachOn ? "ON" : "OFF"}
           </button>
           <label className={styles.diffLabel}>
             <span>強さ</span>
@@ -986,6 +1390,15 @@ export default function ShogiGame() {
                   : "AIの勝ち"}
             </p>
             <p className={styles.resultReason}>{gameOver.reason} — {history.length}手</p>
+            {Object.values(gradeCounts).some(n => n > 0) && (
+              <p className={styles.resultGrades}>
+                {(Object.entries(GRADE_INFO) as [Grade, typeof GRADE_INFO[Grade]][])
+                  .filter(([g]) => gradeCounts[g] > 0)
+                  .map(([g, info]) => `${info.label}${gradeCounts[g]}`)
+                  .join("・")}
+                {gradeCounts.bad === 0 && gradeCounts.blunder === 0 && " — 悪手なし！"}
+              </p>
+            )}
             <div className={styles.resultButtons}>
               <button
                 className={`${styles.btn} ${styles.btnPrimary}`}
